@@ -20,9 +20,9 @@ public class FilteredRoundRobinLoadBalancerTest {
   ImmutableList<String> okFilter = ImmutableList.of("thing1", "thing2");
   ImmutableList<String> badFilter = ImmutableList.of("noThings");
 
-  Node node1 = new Node(new InetSocketAddress("127.0.0.1", 8081));
-  Node node2 = new Node(new InetSocketAddress("127.0.0.1", 8082));
-  Node node3 = new Node(new InetSocketAddress("127.0.0.1", 8083));
+  Node node1 = new Node(new InetSocketAddress("127.0.0.1", 8081), nokFilter, 0);
+  Node node2 = new Node(new InetSocketAddress("127.0.0.1", 8082), okFilter, 0);
+  Node node3 = new Node(new InetSocketAddress("127.0.0.1", 8083), badFilter, 0);
 
   @Test
   public void getNextNode() throws Exception {
@@ -33,10 +33,10 @@ public class FilteredRoundRobinLoadBalancerTest {
     Strategy lb = new FilteredRoundRobinLoadBalancer(ImmutableList.of("thing1", "thing2"));
     Distributor distributor = new Distributor(ImmutableList.of(node1, node2, node3), lb);
 
-    assertEquals(node2.address().getHostName(), distributor.pick().address().getHostName());
-    assertEquals(node2.address().getHostName(), distributor.pick().address().getHostName());
-    assertEquals(node2.address().getHostName(), distributor.pick().address().getHostName());
-    assertEquals(node2.address().getHostName(), distributor.pick().address().getHostName());
+    assertEquals(node2.address().getPort(), distributor.pick().address().getPort());
+    assertEquals(node2.address().getPort(), distributor.pick().address().getPort());
+    assertEquals(node2.address().getPort(), distributor.pick().address().getPort());
+    assertEquals(node2.address().getPort(), distributor.pick().address().getPort());
 
   }
 
