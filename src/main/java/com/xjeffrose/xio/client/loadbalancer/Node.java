@@ -6,29 +6,28 @@ import com.google.common.net.HostAndPort;
 import com.xjeffrose.xio.client.XioConnectionPool;
 import com.xjeffrose.xio.client.asyncretry.AsyncRetryLoop;
 import com.xjeffrose.xio.client.asyncretry.AsyncRetryLoopFactory;
+import com.xjeffrose.xio.client.loadbalancer.connection.NodeConnection;
+import com.xjeffrose.xio.client.loadbalancer.connection.NodeConnectionPool;
 import io.netty.bootstrap.Bootstrap;
-import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.EventLoopGroup;
-import io.netty.util.concurrent.DefaultProgressivePromise;
-import io.netty.util.concurrent.DefaultPromise;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
 import io.netty.util.concurrent.Promise;
+import java.io.Closeable;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.extern.slf4j.Slf4j;
-
-import java.io.Closeable;
-import java.io.IOException;
 
 /**
  * The base type of nodes over which load is balanced. Nodes define the load metric that is used;
@@ -36,7 +35,6 @@ import java.io.IOException;
  */
 @Slf4j
 public class Node implements Closeable {
-
 
   private final UUID token = UUID.randomUUID();
   private final ConcurrentHashMap<Channel, Stopwatch> pending = new ConcurrentHashMap<>();
@@ -50,7 +48,7 @@ public class Node implements Closeable {
   private final Protocol proto;
   private final boolean ssl;
   private final AtomicBoolean available = new AtomicBoolean(true);
-  private final XioConnectionPool connectionPool;
+  private final NodeConnectionPool connectionPool;
   private final EventLoopGroup eventLoopGroup;
   private double load;
 
@@ -66,20 +64,23 @@ public class Node implements Closeable {
     this(address, ImmutableList.of(), weight, "", Protocol.TCP, false, bootstrap);
   }
 
-  public Node(InetSocketAddress address, ImmutableList<String> filters, int weight, String serviceName, Protocol proto, boolean ssl, Bootstrap bootstrap) {
+  public Node(InetSocketAddress address, ImmutableList<String> filters, int weight,
+    String serviceName, Protocol proto, boolean ssl, Bootstrap bootstrap) {
     this(address, filters, weight, serviceName, proto, ssl, bootstrap,
       // TODO(CK): This be passed in, we're not really taking advantage of pooling
-      new XioConnectionPool(bootstrap, new AsyncRetryLoopFactory() {
-        @Override
-        public AsyncRetryLoop buildLoop(EventLoopGroup eventLoopGroup) {
-          return new AsyncRetryLoop(3, bootstrap.config().group(), 1, TimeUnit.SECONDS);
-        }
-      })
+      new NodeConnectionPool(
+        new XioConnectionPool(bootstrap, new AsyncRetryLoopFactory() {
+          @Override
+          public AsyncRetryLoop buildLoop(EventLoopGroup eventLoopGroup) {
+            return new AsyncRetryLoop(3, bootstrap.config().group(), 1, TimeUnit.SECONDS);
+          }
+        })
+      )
     );
   }
 
-
-  public Node(SocketAddress address, ImmutableList<String> filters, int weight, String serviceName, Protocol proto, boolean ssl, Bootstrap bootstrap, XioConnectionPool connectionPool) {
+  public Node(SocketAddress address, ImmutableList<String> filters, int weight, String serviceName,
+    Protocol proto, boolean ssl, Bootstrap bootstrap, NodeConnectionPool connectionPool) {
     this.address = address;
     this.proto = proto;
     this.ssl = ssl;
@@ -107,19 +108,20 @@ public class Node implements Closeable {
    * . The current host and port returned as a InetSocketAddress
    */
   public static InetSocketAddress toInetAddress(HostAndPort hostAndPort) {
-    return (hostAndPort == null) ? null : new InetSocketAddress(hostAndPort.getHostText(), hostAndPort.getPort());
+    return (hostAndPort == null) ? null
+      : new InetSocketAddress(hostAndPort.getHostText(), hostAndPort.getPort());
   }
 
   public Future<Void> send(Object message) {
-    DefaultPromise<Void> promise = new DefaultPromise<>(eventLoopGroup.next());
-
+    Promise<Void> promise = eventLoopGroup.next().newPromise();
     log.debug("Acquiring Node: " + this);
-    Future<Channel> channelResult = connectionPool.acquire();
-    channelResult.addListener(new FutureListener<Channel>() {
-      public void operationComplete(Future<Channel> future) {
+    Promise<NodeConnection> nodeConnectionPromise = eventLoopGroup.next().newPromise();
+    Future<NodeConnection> connectionResult = connectionPool.acquireConnection(nodeConnectionPromise);
+    connectionResult.addListener(new FutureListener<NodeConnection>() {
+      public void operationComplete(Future<NodeConnection> future) {
         if (future.isSuccess()) {
-          Channel channel = future.getNow();
-          channel.writeAndFlush(message).addListener(new ChannelFutureListener() {
+          NodeConnection connection = future.getNow();
+          connection.writeAndFlush(message).addListener(new ChannelFutureListener() {
             public void operationComplete(ChannelFuture channelFuture) {
               if (channelFuture.isSuccess()) {
                 log.debug("write finished for " + message);
@@ -128,7 +130,7 @@ public class Node implements Closeable {
                 log.error("Write error: ", channelFuture.cause());
                 promise.setFailure(channelFuture.cause());
               }
-              connectionPool.release(channel);
+              connectionPool.releaseConnection(connection);
             }
           });
         } else {
@@ -174,6 +176,15 @@ public class Node implements Closeable {
     if (pending.contains(channel)) {
       requestTimes.add(pending.remove(channel).elapsed(TimeUnit.MICROSECONDS));
     }
+  }
+
+  public Future<NodeConnection> acquireConnection() {
+    Promise<NodeConnection> connectionPromise = eventLoopGroup.next().newPromise();
+    return connectionPool.acquireConnection(connectionPromise);
+  }
+
+  public Optional<Future<Void>> releaseConnection(NodeConnection nodeConnection) {
+    return connectionPool.releaseConnection(nodeConnection);
   }
 
   public boolean isAvailable() {

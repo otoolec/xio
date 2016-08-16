@@ -1,7 +1,9 @@
 package com.xjeffrose.xio.client.loadbalancer;
 
 import com.google.common.collect.ImmutableList;
-import com.xjeffrose.xio.client.XioConnectionPool;
+import com.xjeffrose.xio.client.loadbalancer.connection.ChannelNodeConnection;
+import com.xjeffrose.xio.client.loadbalancer.connection.NodeConnection;
+import com.xjeffrose.xio.client.loadbalancer.connection.NodeConnectionPool;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
@@ -12,17 +14,16 @@ import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.FutureListener;
+import io.netty.util.concurrent.Promise;
 import java.net.InetSocketAddress;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.ArgumentCaptor;
-import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.runners.MockitoJUnitRunner;
 
 import static org.junit.Assert.assertEquals;
+import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -31,23 +32,20 @@ import static org.mockito.Mockito.when;
 public class NodeTest {
 
   @Mock
-  XioConnectionPool connectionPool;
+  private NodeConnectionPool connectionPool;
 
   @Mock
-  InetSocketAddress address;
+  private InetSocketAddress address;
 
   @Mock
-  Future<Channel> futureChannel;
+  private Future<Channel> futureChannel;
 
-  @Captor
-  ArgumentCaptor<FutureListener<Channel>> futureListenerChannelCaptor;
-
-  ImmutableList<String> filters;
-  int weight;
-  String serviceName;
-  Protocol proto;
-  boolean ssl;
-  Bootstrap bootstrap;
+  private ImmutableList<String> filters;
+  private int weight;
+  private String serviceName;
+  private Protocol proto;
+  private boolean ssl;
+  private Bootstrap bootstrap;
 
   @Before
   public void setUp() {
@@ -62,24 +60,16 @@ public class NodeTest {
   @Test
   public void testSend_successfulWrite() throws Exception {
     EmbeddedChannel channel = new EmbeddedChannel();
-    bootstrap.group(channel.eventLoop());
-    when(connectionPool.acquire()).thenReturn(futureChannel);
+    ChannelNodeConnection nodeConnection =
+      createChannelNodeConnection(channel);
     Node node = createNode();
     Object message = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/test");
 
     Future<Void> sendFuture = node.send(message);
 
-    assertEquals(false, sendFuture.isSuccess());
-    verify(futureChannel).addListener(futureListenerChannelCaptor.capture());
-
-    when(futureChannel.isSuccess()).thenReturn(true);
-    when(futureChannel.getNow()).thenReturn(channel);
-
-    futureListenerChannelCaptor.getValue().operationComplete(futureChannel);
-
     assertEquals(true, sendFuture.isSuccess());
     assertEquals(message, channel.outboundMessages().poll());
-    verify(connectionPool).release(channel);
+    verify(connectionPool).releaseConnection(nodeConnection);
   }
 
   @Test
@@ -91,50 +81,51 @@ public class NodeTest {
         throw cause;
       }
     });
-    bootstrap.group(channel.eventLoop());
-    when(connectionPool.acquire()).thenReturn(futureChannel);
+    ChannelNodeConnection nodeConnection = createChannelNodeConnection(channel);
+
     Node node = createNode();
     Object message = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/test");
 
     Future<Void> sendFuture = node.send(message);
 
     assertEquals(false, sendFuture.isSuccess());
-    verify(futureChannel).addListener(futureListenerChannelCaptor.capture());
-
-    when(futureChannel.isSuccess()).thenReturn(true);
-    when(futureChannel.getNow()).thenReturn(channel);
-
-    futureListenerChannelCaptor.getValue().operationComplete(futureChannel);
-
-    assertEquals(false, sendFuture.isSuccess());
     assertEquals(cause, sendFuture.cause());
     assertEquals(0, channel.outboundMessages().size());
-    verify(connectionPool).release(channel);
+    verify(connectionPool).releaseConnection(nodeConnection);
   }
 
   @Test
   public void testSend_failedAcquire() throws Exception {
     EmbeddedChannel channel = new EmbeddedChannel();
     bootstrap.group(channel.eventLoop());
-    when(connectionPool.acquire()).thenReturn(futureChannel);
+    ChannelNodeConnection nodeConnection = new ChannelNodeConnection(channel);
+    final Throwable cause = new Throwable("ran out of resources");
+    when(connectionPool.acquireConnection(any(Promise.class))).then(invocation -> {
+      Promise<NodeConnection> promise = invocation.getArgumentAt(0, Promise.class);
+      promise.setFailure(cause);
+      return promise;
+    });
+
     Node node = createNode();
     Object message = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/test");
 
     Future<Void> sendFuture = node.send(message);
 
     assertEquals(false, sendFuture.isSuccess());
-    verify(futureChannel).addListener(futureListenerChannelCaptor.capture());
-
-    when(futureChannel.isSuccess()).thenReturn(false);
-    Throwable cause = new Throwable("ran out of resources");
-    when(futureChannel.cause()).thenReturn(cause);
-
-    futureListenerChannelCaptor.getValue().operationComplete(futureChannel);
-
-    assertEquals(false, sendFuture.isSuccess());
     assertEquals(cause, sendFuture.cause());
     assertEquals(0, channel.outboundMessages().size());
-    verify(connectionPool, never()).release(channel);
+    verify(connectionPool, never()).releaseConnection(nodeConnection);
+  }
+
+  ChannelNodeConnection createChannelNodeConnection(EmbeddedChannel channel) {
+    bootstrap.group(channel.eventLoop());
+    ChannelNodeConnection nodeConnection = new ChannelNodeConnection(channel);
+    when(connectionPool.acquireConnection(any(Promise.class))).then(invocation -> {
+      Promise<NodeConnection> promise = invocation.getArgumentAt(0, Promise.class);
+      promise.setSuccess(nodeConnection);
+      return promise;
+    });
+    return nodeConnection;
   }
 
   private Node createNode() {
