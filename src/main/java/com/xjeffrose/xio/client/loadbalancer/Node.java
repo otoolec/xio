@@ -113,26 +113,14 @@ public class Node implements Closeable {
   }
 
   public Future<Void> send(Object message) {
-    Promise<Void> promise = eventLoopGroup.next().newPromise();
+    final Promise<Void> promise = eventLoopGroup.next().newPromise();
     log.debug("Acquiring Node: " + this);
-    Promise<NodeConnection> nodeConnectionPromise = eventLoopGroup.next().newPromise();
-    Future<NodeConnection> connectionResult = connectionPool.acquireConnection(nodeConnectionPromise);
+    final Future<NodeConnection> connectionResult = acquireConnection();
     connectionResult.addListener(new FutureListener<NodeConnection>() {
       public void operationComplete(Future<NodeConnection> future) {
         if (future.isSuccess()) {
           NodeConnection connection = future.getNow();
-          connection.writeAndFlush(message).addListener(new ChannelFutureListener() {
-            public void operationComplete(ChannelFuture channelFuture) {
-              if (channelFuture.isSuccess()) {
-                log.debug("write finished for " + message);
-                promise.setSuccess(null);
-              } else {
-                log.error("Write error: ", channelFuture.cause());
-                promise.setFailure(channelFuture.cause());
-              }
-              connectionPool.releaseConnection(connection);
-            }
-          });
+          writeAndFlush(connection, message, promise);
         } else {
           log.error("Could not connect to client for write: " + future.cause());
           promise.setFailure(future.cause());
@@ -141,6 +129,22 @@ public class Node implements Closeable {
     });
 
     return promise;
+  }
+
+  protected void writeAndFlush(final NodeConnection connection, final Object message,
+    final Promise<Void> promise) {
+    connection.writeAndFlush(message).addListener(new ChannelFutureListener() {
+      public void operationComplete(ChannelFuture channelFuture) {
+        if (channelFuture.isSuccess()) {
+          log.debug("write finished for " + message);
+          promise.setSuccess(null);
+        } else {
+          log.error("Write error: ", channelFuture.cause());
+          promise.setFailure(channelFuture.cause());
+        }
+        connectionPool.releaseConnection(connection);
+      }
+    });
   }
 
   /**
@@ -180,10 +184,18 @@ public class Node implements Closeable {
 
   public Future<NodeConnection> acquireConnection() {
     Promise<NodeConnection> connectionPromise = eventLoopGroup.next().newPromise();
+    connectionPromise.addListener(connectionFuture -> {
+      if (connectionFuture.isSuccess()) {
+        // TODO: Ideally we track connections instead of channels
+        //addPending(connectionFuture.getNow());
+      }
+    });
     return connectionPool.acquireConnection(connectionPromise);
   }
 
   public Optional<Future<Void>> releaseConnection(NodeConnection nodeConnection) {
+    // TODO: Ideally we track connections instead of channels
+    //removePending(nodeConnection);
     return connectionPool.releaseConnection(nodeConnection);
   }
 
