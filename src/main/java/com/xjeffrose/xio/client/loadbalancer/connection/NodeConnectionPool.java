@@ -40,6 +40,7 @@ public class NodeConnectionPool {
 
   public Optional<Future<Void>> releaseConnection(NodeConnection nodeConnection) {
     if (leasedConnections.containsKey(nodeConnection)) {
+      nodeConnection.close();
       Channel channel = leasedConnections.remove(nodeConnection);
       return Optional.of(xioPool.release(channel));
     }

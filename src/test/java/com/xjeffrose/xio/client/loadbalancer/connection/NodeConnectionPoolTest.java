@@ -40,11 +40,6 @@ public class NodeConnectionPoolTest {
 
   @Before
   public void setUp() {
-    //filters = ImmutableList.of();
-    //weight = 1;
-    //serviceName = "testserv";
-    //proto = Protocol.TCP;
-    //ssl = false;
     bootstrap = new Bootstrap();
     nodeConnectionPool = new NodeConnectionPool(xioConnectionPool);
   }
@@ -56,15 +51,6 @@ public class NodeConnectionPoolTest {
     bootstrap.group(channel.eventLoop());
 
     when(xioConnectionPool.acquire()).thenReturn(futureChannel);
-
-    //ChannelNodeConnection nodeConnection = new ChannelNodeConnection(channel);
-    //when(connectionPool.acquireConnection(any(Promise.class))).then(invocation -> {
-    //  Promise<NodeConnection> promise = invocation.getArgumentAt(0, Promise.class);
-    //  promise.setSuccess(nodeConnection);
-    //  return null;
-    //});
-    //
-    //Node node = createNode();
 
     when(futureChannel.isSuccess()).thenReturn(true);
     when(futureChannel.getNow()).thenReturn(channel);
